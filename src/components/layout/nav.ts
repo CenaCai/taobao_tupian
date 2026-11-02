@@ -1,6 +1,7 @@
 import type { LinkProps } from '@tanstack/react-router'
 import {
   BookOpenIcon,
+  ImagePlusIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
   PersonStandingIcon,
@@ -41,6 +42,7 @@ export const navGroups: NavGroup[] = [
   {
     label: '配置与说明',
     items: [
+      { title: '我的上传素材', to: '/uploads', icon: ImagePlusIcon },
       { title: 'API 接口配置', to: '/settings', icon: KeyRoundIcon },
       { title: '使用说明与免责声明', to: '/guide', icon: BookOpenIcon },
     ],

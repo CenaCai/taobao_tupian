@@ -24,7 +24,10 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
+import { assetToGalleryItem, loadUploadLibrary, type UploadedAsset } from '@/lib/uploadLibrary'
+import { referenceImageUrl } from '@/lib/recipeImages'
 import { useStudio } from '@/store/studioStore'
+import type { PortraitItem } from '@/types/gallery'
 
 export const Route = createFileRoute('/portraits')({
   staticData: { title: '人像颜值库' },
@@ -46,16 +49,33 @@ function PortraitsPage() {
   const [query, setQuery] = useState('')
   const [shown, setShown] = useState(60)
   const [viewerIndex, setViewerIndex] = useState<number | null>(null)
+  const [uploadedPortraits, setUploadedPortraits] = useState<PortraitItem[]>([])
+
+  // 合并「我的上传素材」中的人像，使其可与内置图库一并筛选、加入配方
+  useEffect(() => {
+    let active = true
+    loadUploadLibrary().then((list: UploadedAsset[]) => {
+      if (!active) return
+      setUploadedPortraits(
+        list.filter((a) => a.kind === 'portrait').map((a) => assetToGalleryItem(a).portrait)
+      )
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const allPortraits = useMemo(() => [...uploadedPortraits, ...portraits], [uploadedPortraits, portraits])
 
   const styleOptions = useMemo(() => {
-    const sub = portraits.filter((p) => (!section || p.分区 === section) && (!hair || p.发长 === hair))
+    const sub = allPortraits.filter((p) => (!section || p.分区 === section) && (!hair || p.发长 === hair))
     return [...new Set(sub.map((p) => p.发型名称).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'))
-  }, [portraits, section, hair])
+  }, [allPortraits, section, hair])
 
   const q = query.trim().toLowerCase()
 
   const filtered = useMemo(() => {
-    return portraits.filter((item) => {
+    return allPortraits.filter((item) => {
       if (section && item.分区 !== section) return false
       if (hair && item.发长 !== hair) return false
       if (styleName !== 'all' && item.发型名称 !== styleName) return false
@@ -63,7 +83,7 @@ function PortraitsPage() {
       if (q && !item.检索.toLowerCase().includes(q)) return false
       return true
     })
-  }, [portraits, section, hair, styleName, onlyHot, q])
+  }, [allPortraits, section, hair, styleName, onlyHot, q])
 
   const currentItem = viewerIndex !== null ? filtered[viewerIndex] : null
 
@@ -116,10 +136,10 @@ function PortraitsPage() {
               : 'bg-muted text-muted-foreground hover:text-foreground'
           )}
         >
-          全部人像 ({portraits.length})
+          全部人像 ({allPortraits.length})
         </button>
         {(['正脸参考', '造型氛围'] as const).map((sec) => {
-          const cnt = portraits.filter((x) => x.分区 === sec).length
+          const cnt = allPortraits.filter((x) => x.分区 === sec).length
           return (
             <button
               key={sec}
@@ -141,7 +161,7 @@ function PortraitsPage() {
           )
         })}
         {HAIRS.map((h) => {
-          const cnt = portraits.filter((x) => x.发长 === h).length
+          const cnt = allPortraits.filter((x) => x.发长 === h).length
           return (
             <button
               key={h}
@@ -231,7 +251,7 @@ function PortraitsPage() {
                   className="relative aspect-4/5 cursor-zoom-in overflow-hidden rounded-2xl bg-background"
                 >
                   <img
-                    src={`/${item.缩略图}`}
+                    src={referenceImageUrl(item.缩略图)}
                     alt={item.标题}
                     loading="lazy"
                     className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
@@ -295,7 +315,7 @@ function PortraitsPage() {
               <div className="grid md:grid-cols-[1fr_320px]">
                 <div className="relative flex max-h-[78vh] min-h-[380px] items-center justify-center bg-muted/60 p-4">
                   <img
-                    src={`/${currentItem.原图}`}
+                    src={referenceImageUrl(currentItem.原图)}
                     alt={currentItem.标题}
                     className="max-h-[72vh] w-auto rounded-lg object-contain"
                   />
@@ -361,13 +381,13 @@ function PortraitsPage() {
                     </Button>
                     <div className="grid grid-cols-2 gap-2">
                       <Button variant="outline" size="sm" asChild>
-                        <a href={`/${currentItem.原图}`} download={`${currentItem.id}.webp`}>
+                        <a href={referenceImageUrl(currentItem.原图)} download={`${currentItem.id}.webp`}>
                           <DownloadIcon className="size-3.5" />
                           下载高清原图
                         </a>
                       </Button>
                       <Button variant="outline" size="sm" asChild>
-                        <a href={`/${currentItem.原图}`} target="_blank" rel="noopener noreferrer">
+                        <a href={referenceImageUrl(currentItem.原图)} target="_blank" rel="noopener noreferrer">
                           <ExternalLinkIcon className="size-3.5" />
                           新窗口原图
                         </a>
