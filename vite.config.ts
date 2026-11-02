@@ -19,9 +19,13 @@ const MIME: Record<string, string> = {
 
 // 本地缺失的素材（尤其是体积庞大的 img/ 原图）从远程仓库按需回源，
 // 命中后写入本地缓存，避免重复下载 1 GB 素材。
+// 可通过环境变量控制：
+//   REMOTE_ASSET_BASE  指定远程源（默认本仓库 main 分支）
+//   REMOTE_ASSET_OFF=1 禁用回源，缺失素材一律返回 404
 const REMOTE_RAW_BASE =
   process.env.REMOTE_ASSET_BASE ||
   'https://raw.githubusercontent.com/CenaCai/taobao_tupian/main'
+const REMOTE_ASSET_ENABLED = process.env.REMOTE_ASSET_OFF !== '1'
 
 const inflight = new Map<string, Promise<Buffer | null>>()
 
@@ -55,6 +59,7 @@ function httpsGet(url: string, redirects = 3): Promise<Buffer | null> {
 }
 
 async function fetchRemoteAsset(urlPath: string): Promise<Buffer | null> {
+  if (!REMOTE_ASSET_ENABLED) return null
   const existing = inflight.get(urlPath)
   if (existing) return existing
   const task = (async () => {
