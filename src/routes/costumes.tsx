@@ -23,7 +23,10 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
+import { assetToGalleryItem, loadUploadLibrary, type UploadedAsset } from '@/lib/uploadLibrary'
+import { referenceImageUrl } from '@/lib/recipeImages'
 import { useStudio } from '@/store/studioStore'
+import type { CostumeItem } from '@/types/gallery'
 
 export const Route = createFileRoute('/costumes')({
   staticData: { title: '服装穿搭库' },
@@ -41,14 +44,31 @@ function CostumesPage() {
   const [query, setQuery] = useState('')
   const [shown, setShown] = useState(60)
   const [viewerIndex, setViewerIndex] = useState<number | null>(null)
+  const [uploadedCostumes, setUploadedCostumes] = useState<CostumeItem[]>([])
+
+  // 合并「我的上传素材」中的服装，使其可与内置图库一并筛选、加入配方
+  useEffect(() => {
+    let active = true
+    loadUploadLibrary().then((list: UploadedAsset[]) => {
+      if (!active) return
+      setUploadedCostumes(
+        list.filter((a) => a.kind === 'costume').map((a) => assetToGalleryItem(a).costume)
+      )
+    })
+    return () => {
+      active = false
+    }
+  }, [])
 
   const activeCategory = safeMode && category && isNsfwCostumeCategory(category) ? '' : category
 
+  const allCostumes = useMemo(() => [...uploadedCostumes, ...costumes], [uploadedCostumes, costumes])
+
   const baseCostumes = useMemo(
-    () => (safeMode ? costumes.filter((x) => !isNsfwCostume(x)) : costumes),
-    [costumes, safeMode]
+    () => (safeMode ? allCostumes.filter((x) => !isNsfwCostume(x)) : allCostumes),
+    [allCostumes, safeMode]
   )
-  const hiddenNsfwCount = costumes.length - baseCostumes.length
+  const hiddenNsfwCount = allCostumes.length - baseCostumes.length
 
   const categories = useMemo(
     () => [...new Set(baseCostumes.map((x) => x.分类))],
@@ -107,7 +127,7 @@ function CostumesPage() {
           全部穿搭 ({baseCostumes.length})
         </button>
         {categories.map((c) => {
-          const cnt = costumes.filter((x) => x.分类 === c).length
+          const cnt = allCostumes.filter((x) => x.分类 === c).length
           const isNsfw = isNsfwCostumeCategory(c)
           return (
             <button
@@ -211,7 +231,7 @@ function CostumesPage() {
                   className="relative aspect-2/3 cursor-zoom-in overflow-hidden rounded-2xl bg-background"
                 >
                   <img
-                    src={`/${item.缩略图}`}
+                    src={referenceImageUrl(item.缩略图)}
                     alt={item.服装名称}
                     loading="lazy"
                     className="h-full w-full object-contain transition duration-300 group-hover:scale-105"
@@ -276,7 +296,7 @@ function CostumesPage() {
               <div className="grid md:grid-cols-[1fr_320px]">
                 <div className="relative flex max-h-[78vh] min-h-[380px] items-center justify-center bg-muted/60 p-4">
                   <img
-                    src={`/${currentItem.预览图 || currentItem.原图}`}
+                    src={referenceImageUrl(currentItem.预览图 || currentItem.原图)}
                     alt={currentItem.服装名称}
                     className="max-h-[72vh] w-auto rounded-lg object-contain"
                   />
@@ -347,13 +367,13 @@ function CostumesPage() {
                     </Button>
                     <div className="grid grid-cols-2 gap-2">
                       <Button variant="outline" size="sm" asChild>
-                        <a href={`/${currentItem.原图}`} download={`${currentItem.id}.webp`}>
+                        <a href={referenceImageUrl(currentItem.原图)} download={`${currentItem.id}.webp`}>
                           <DownloadIcon className="size-3.5" />
                           下载高清原图
                         </a>
                       </Button>
                       <Button variant="outline" size="sm" asChild>
-                        <a href={`/${currentItem.原图}`} target="_blank" rel="noopener noreferrer">
+                        <a href={referenceImageUrl(currentItem.原图)} target="_blank" rel="noopener noreferrer">
                           <ExternalLinkIcon className="size-3.5" />
                           新窗口原图
                         </a>
