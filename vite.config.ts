@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import https from 'node:https'
 import path from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import { tanstackRouter } from '@tanstack/router-plugin/vite'
@@ -14,6 +15,57 @@ const MIME: Record<string, string> = {
   '.webp': 'image/webp',
   '.xml': 'application/xml; charset=utf-8',
   '.txt': 'text/plain; charset=utf-8',
+}
+
+// 本地缺失的素材（尤其是体积庞大的 img/ 原图）从远程仓库按需回源，
+// 命中后写入本地缓存，避免重复下载 1 GB 素材。
+const REMOTE_RAW_BASE =
+  process.env.REMOTE_ASSET_BASE ||
+  'https://raw.githubusercontent.com/CenaCai/taobao_tupian/main'
+
+const inflight = new Map<string, Promise<Buffer | null>>()
+
+// 注意：Node 内置 fetch(undici) 在本机代理环境下会连接超时，
+// 原生 https.get 直连可用，因此回源走 https 模块。
+function httpsGet(url: string, redirects = 3): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    const req = https.get(url, { timeout: 30000 }, (res) => {
+      const status = res.statusCode || 0
+      if (status >= 300 && status < 400 && res.headers.location && redirects > 0) {
+        res.resume()
+        resolve(httpsGet(new URL(res.headers.location, url).toString(), redirects - 1))
+        return
+      }
+      if (status !== 200) {
+        res.resume()
+        resolve(null)
+        return
+      }
+      const chunks: Buffer[] = []
+      res.on('data', (c: Buffer) => chunks.push(c))
+      res.on('end', () => resolve(Buffer.concat(chunks)))
+      res.on('error', () => resolve(null))
+    })
+    req.on('timeout', () => {
+      req.destroy()
+      resolve(null)
+    })
+    req.on('error', () => resolve(null))
+  })
+}
+
+async function fetchRemoteAsset(urlPath: string): Promise<Buffer | null> {
+  const existing = inflight.get(urlPath)
+  if (existing) return existing
+  const task = (async () => {
+    try {
+      return await httpsGet(`${REMOTE_RAW_BASE}${urlPath}`)
+    } finally {
+      inflight.delete(urlPath)
+    }
+  })()
+  inflight.set(urlPath, task)
+  return task
 }
 
 // 开发与预览时：
@@ -67,7 +119,7 @@ function localAssetsAndProxyPlugin(): Plugin {
     }
   }
 
-  const serve = (req: any, res: any, next: any) => {
+  const serve = async (req: any, res: any, next: any) => {
     const rawUrl = (req.url || '').split('?')[0]
     if (rawUrl === '/api/proxy') {
       void handleProxy(req, res)
@@ -79,7 +131,41 @@ function localAssetsAndProxyPlugin(): Plugin {
     }
     const filePath = path.join(rootDir, decoded)
     if (!filePath.startsWith(rootDir) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-      return next()
+      // 本地缺失：优先从远程仓库回源（写回本地缓存），失败再返回明确错误。
+      const ext = path.extname(decoded).toLowerCase()
+      const remote = await fetchRemoteAsset(decoded)
+      if (remote) {
+        if (filePath.startsWith(rootDir)) {
+          try {
+            fs.mkdirSync(path.dirname(filePath), { recursive: true })
+            fs.writeFileSync(filePath, remote)
+          } catch {
+            // 缓存写入失败不影响本次响应
+          }
+        }
+        res.setHeader('Content-Type', MIME[ext] || 'application/octet-stream')
+        res.setHeader('Cache-Control', 'public, max-age=3600')
+        res.end(remote)
+        return
+      }
+      // 回源失败：不要落到 SPA 回退（会返回 index.html，导致 res.json() 报
+      // "Unexpected token '<'"）。按资源类型给出明确的错误响应。
+      if (ext === '.json') {
+        res.statusCode = 404
+        res.setHeader('Content-Type', 'application/json; charset=utf-8')
+        res.end(
+          JSON.stringify({
+            error: `本地与远程均缺少数据文件 ${decoded}`,
+            hint: '请先同步仓库中的 data/ 目录后重试',
+          })
+        )
+        return
+      }
+      // 图片等二进制素材：返回 404，避免把 HTML 当作图片渲染
+      res.statusCode = 404
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+      res.end(`Missing asset: ${decoded}`)
+      return
     }
     const ext = path.extname(filePath).toLowerCase()
     res.setHeader('Content-Type', MIME[ext] || 'application/octet-stream')
