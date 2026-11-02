@@ -1,5 +1,4 @@
 import fs from 'node:fs'
-import https from 'node:https'
 import path from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import { tanstackRouter } from '@tanstack/router-plugin/vite'
@@ -29,33 +28,88 @@ const REMOTE_ASSET_ENABLED = process.env.REMOTE_ASSET_OFF !== '1'
 
 const inflight = new Map<string, Promise<Buffer | null>>()
 
-// 注意：Node 内置 fetch(undici) 在本机代理环境下会连接超时，
-// 原生 https.get 直连可用，因此回源走 https 模块。
-function httpsGet(url: string, redirects = 3): Promise<Buffer | null> {
-  return new Promise((resolve) => {
-    const req = https.get(url, { timeout: 30000 }, (res) => {
-      const status = res.statusCode || 0
-      if (status >= 300 && status < 400 && res.headers.location && redirects > 0) {
-        res.resume()
-        resolve(httpsGet(new URL(res.headers.location, url).toString(), redirects - 1))
-        return
+// 代理隧道并发数有限，超出会被拒；用闸门限制同时进行的回源数量。
+const MAX_CONCURRENT_REMOTE = 4
+let remoteActive = 0
+const remoteQueue: (() => void)[] = []
+
+function acquireRemoteSlot(): Promise<void> {
+  if (remoteActive < MAX_CONCURRENT_REMOTE) {
+    remoteActive++
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => remoteQueue.push(resolve))
+}
+
+function releaseRemoteSlot(): void {
+  const next = remoteQueue.shift()
+  if (next) next()
+  else remoteActive--
+}
+
+// 回源通道：优先用 GitHub API blob 接口（稳定，不受 raw 隧道抖动影响），
+// 回退到 raw 直连。当前代理环境下 raw 隧道经常 502，故以 API 为主。
+const GITHUB_API = 'https://api.github.com/repos/CenaCai/taobao_tupian'
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || ''
+
+async function apiGetJson(url: string): Promise<any | null> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const headers: Record<string, string> = {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'ai-pose-gallery-zh-dev',
       }
-      if (status !== 200) {
-        res.resume()
-        resolve(null)
-        return
+      if (GITHUB_TOKEN) headers.Authorization = `Bearer ${GITHUB_TOKEN}`
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(30000) })
+      if (!res.ok) return null
+      return await res.json()
+    } catch {
+      await new Promise((r) => setTimeout(r, 300 * (attempt + 1)))
+    }
+  }
+  return null
+}
+
+// 路径 -> blob sha 映射（懒加载，首次访问时拉取整棵树）
+let treePromise: Promise<Map<string, string>> | null = null
+function getRemoteTree(): Promise<Map<string, string>> {
+  if (!treePromise) {
+    treePromise = (async () => {
+      const map = new Map<string, string>()
+      const data = await apiGetJson(`${GITHUB_API}/git/trees/main?recursive=1`)
+      for (const item of data?.tree || []) {
+        if (item.type === 'blob') map.set(item.path, item.sha)
       }
-      const chunks: Buffer[] = []
-      res.on('data', (c: Buffer) => chunks.push(c))
-      res.on('end', () => resolve(Buffer.concat(chunks)))
-      res.on('error', () => resolve(null))
+      return map
+    })()
+  }
+  return treePromise
+}
+
+async function blobByPath(urlPath: string): Promise<Buffer | null> {
+  const tree = await getRemoteTree()
+  const sha = tree.get(urlPath.replace(/^\//, ''))
+  if (!sha) return null
+  const data = await apiGetJson(`${GITHUB_API}/git/blobs/${sha}`)
+  if (!data?.content) return null
+  try {
+    return Buffer.from(data.content, data.encoding === 'base64' ? 'base64' : 'utf8')
+  } catch {
+    return null
+  }
+}
+
+async function rawFallback(urlPath: string): Promise<Buffer | null> {
+  try {
+    const res = await fetch(`${REMOTE_RAW_BASE}${urlPath}`, {
+      signal: AbortSignal.timeout(20000),
+      headers: { 'User-Agent': 'ai-pose-gallery-zh-dev' },
     })
-    req.on('timeout', () => {
-      req.destroy()
-      resolve(null)
-    })
-    req.on('error', () => resolve(null))
-  })
+    if (!res.ok) return null
+    return Buffer.from(await res.arrayBuffer())
+  } catch {
+    return null
+  }
 }
 
 async function fetchRemoteAsset(urlPath: string): Promise<Buffer | null> {
@@ -64,7 +118,14 @@ async function fetchRemoteAsset(urlPath: string): Promise<Buffer | null> {
   if (existing) return existing
   const task = (async () => {
     try {
-      return await httpsGet(`${REMOTE_RAW_BASE}${urlPath}`)
+      await acquireRemoteSlot()
+      try {
+        const viaApi = await blobByPath(urlPath)
+        if (viaApi && viaApi.length) return viaApi
+        return await rawFallback(urlPath)
+      } finally {
+        releaseRemoteSlot()
+      }
     } finally {
       inflight.delete(urlPath)
     }
